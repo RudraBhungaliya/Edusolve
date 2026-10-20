@@ -1,106 +1,100 @@
 """
-Author: Aryan Patel
+Author: Aryan Patel, Rudra Bhungaliya, Vishvarajsinh Zala
 Date of creation: 20th Feb 2026
+Refactored: April 2026 (Service-Oriented Core Architecture for EduSolve)
+
+This module provides the core interface for the EduSolve AI Tutor.
+It delegates to reusable backend services and offers backward-compatible
+helper functions for CLI and web integrations.
 """
 
-import os
-import json
-from dotenv import load_dotenv
-from groq import Groq
+import sys
+from typing import Any, Dict, List
 
-load_dotenv()
+from services import (
+    AuthenticationError,
+    EduSolveError,
+    RateLimitError,
+    ServiceUnavailableError,
+    TutorService,
+    ValidationError,
+    validate_grade,
+    validate_question,
+    validate_subject,
+)
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-MODEL = "llama-3.1-8b-instant"  # Alternatives: "llama-3.3-70b-versatile", "llama-3.1-70b-versatile"
-
-SYSTEM_PROMPT = """
-You are EduSolve AI, a tutor for Indian Class 9 and 10 students.
-You ONLY answer Science and Mathematics questions.
-If the question is not about Science or Maths, reply:
-"I only help with Science and Maths doubts!"
-
-Always respond in this exact format:
-
-EXPLANATION:
-(explain clearly in simple language for a 15 year old)
-
-KEY FORMULA / FACT:
-(the most important formula or fact)
-
-REAL EXAMPLE:
-(one simple real life example)
-"""
+# Shared default service instance
+_tutor_service = TutorService()
 
 
 def ask_doubt(question: str, subject: str, grade: int) -> str:
-    prompt = f"[Class {grade}] [{subject}] Student doubt: {question}"
+    """
+    Submit an academic doubt and receive the raw pedagogical explanation string.
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
+    Parameters:
+      question (str): The academic question/doubt.
+      subject (str): 'Science' or 'Maths'.
+      grade (int): 9 or 10.
+
+    Returns:
+      str: Formatted 3-part explanation (EXPLANATION, KEY FORMULA / FACT, REAL EXAMPLE).
+    """
+    return _tutor_service.ask_doubt_raw(question=question, subject=subject, grade=grade)
+
+
+def get_practice_questions(ai_answer: str, subject: str, grade: int) -> List[Dict[str, Any]]:
+    """
+    Generate 3 practice questions with answers based on the AI tutor's explanation.
+
+    Parameters:
+      ai_answer (str): The explanation text provided by the AI tutor.
+      subject (str): 'Science' or 'Maths'.
+      grade (int): 9 or 10.
+
+    Returns:
+      list: List of question dictionaries with keys 'question', 'answer', 'type'.
+    """
+    questions = _tutor_service.generate_practice_questions(
+        ai_answer=ai_answer, subject=subject, grade=grade
     )
-    return response.choices[0].message.content
+    return [q.to_dict() for q in questions]
 
 
-def get_practice_questions(ai_answer: str, subject: str, grade: int) -> list:
-    prompt = f"""
-Based on this explanation given to a Class {grade} {subject} student:
-{ai_answer}
+def solve_doubt(question: str, subject: str, grade: int) -> Dict[str, Any]:
+    """
+    End-to-end doubt resolution returning both structured answer and practice questions.
 
-Generate exactly 3 practice questions.
-Return ONLY a JSON array like this, nothing else:
-[
-  {{"question": "...", "answer": "...", "type": "mcq"}},
-  {{"question": "...", "answer": "...", "type": "short"}},
-  {{"question": "...", "answer": "...", "type": "short"}}
-]
-"""
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "Return only valid JSON. No explanation, no markdown."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    raw = response.choices[0].message.content
-    start = raw.find("[")
-    end = raw.rfind("]") + 1
-    if start != -1 and end != 0:
-        try:
-            return json.loads(raw[start:end])
-        except json.JSONDecodeError:
-            return []
-    return []
-
-
-def solve_doubt(question: str, subject: str, grade: int) -> dict:
-    print(f"\n Thinking about: {question}\n")
-    answer = ask_doubt(question, subject, grade)
-    practice = get_practice_questions(answer, subject, grade)
-    return {
-        "question": question,
-        "subject": subject,
-        "grade": grade,
-        "answer": answer,
-        "practice_questions": practice
+    Returns dictionary matching legacy contract:
+    {
+      "question": str,
+      "subject": str,
+      "grade": int,
+      "answer": str,
+      "practice_questions": list[dict],
+      "structured_answer": dict
     }
+    """
+    print(f"\n Thinking about: {question}\n")
+    response = _tutor_service.solve_doubt(question=question, subject=subject, grade=grade)
+    return response.to_legacy_dict()
 
+
+# ---------------------------------------------------------------------------
+# CLI Interactive Prompts & Terminal Runner
+# ---------------------------------------------------------------------------
 
 def get_grade() -> int:
-    """Prompt user for a valid grade (9 or 10)."""
+    """Prompt user for a valid grade (9 or 10) with validation."""
     while True:
         grade_input = input("Enter your Class (9 or 10): ").strip()
-        if grade_input in ["9", "10"]:
-            return int(grade_input)
-        print(" Invalid class. Please enter 9 or 10.")
+        try:
+            return validate_grade(grade_input)
+        except ValidationError as err:
+            print(f"❌ {err.message}")
 
 
 def get_subject() -> str:
-    """Prompt user for a valid subject."""
+    """Prompt user for a valid subject (Science or Maths)."""
     while True:
         print("\nChoose Subject:")
         print("  1. Science")
@@ -108,54 +102,81 @@ def get_subject() -> str:
         choice = input("Enter 1 or 2: ").strip()
         if choice == "1":
             return "Science"
-        elif choice == "2":
+        if choice == "2":
             return "Maths"
-        print(" Invalid choice. Please enter 1 or 2.")
+
+        # Also support typing the subject name directly
+        try:
+            return validate_subject(choice)
+        except ValidationError:
+            print("❌ Invalid choice. Please enter 1, 2, 'Science', or 'Maths'.")
 
 
 def get_question() -> str:
-    """Prompt user for a non-empty question."""
+    """Prompt user for a valid, non-empty academic question."""
     while True:
         question = input("\nType your doubt/question: ").strip()
-        if question:
-            return question
-        print(" Question cannot be empty. Please try again.")
+        try:
+            return validate_question(question)
+        except ValidationError as err:
+            print(f"❌ {err.message}")
 
 
-if __name__ == "__main__":
+def run_cli() -> None:
+    """Main terminal loop with user-friendly error recovery."""
     print("=" * 60)
-    print("         Welcome to EduSolve AI Tutor ")
+    print("         Welcome to EduSolve AI Tutor 🎓")
     print("     For Class 9 & 10 | Science & Maths")
     print("=" * 60)
 
     while True:
-        # Collect inputs
-        grade    = get_grade()
-        subject  = get_subject()
-        question = get_question()
+        try:
+            # Collect validated inputs
+            grade = get_grade()
+            subject = get_subject()
+            question = get_question()
 
-        # Get AI answer
-        result = solve_doubt(question=question, subject=subject, grade=grade)
+            # Execute AI doubt resolution
+            result = solve_doubt(question=question, subject=subject, grade=grade)
 
-        # Display answer
-        print("\n" + "=" * 60)
-        print("ANSWER:")
-        print("=" * 60)
-        print(result["answer"])
-
-        # Display practice questions
-        if result["practice_questions"]:
+            # Display answer
             print("\n" + "=" * 60)
-            print("PRACTICE QUESTIONS:")
+            print("ANSWER:")
             print("=" * 60)
-            for i, q in enumerate(result["practice_questions"], 1):
-                print(f"\nQ{i} [{q['type'].upper()}]: {q['question']}")
-                print(f"   Answer: {q['answer']}")
+            print(result["answer"])
+
+            # Display practice questions
+            if result["practice_questions"]:
+                print("\n" + "=" * 60)
+                print("PRACTICE QUESTIONS:")
+                print("=" * 60)
+                for i, q in enumerate(result["practice_questions"], 1):
+                    q_type = q.get("type", "short").upper()
+                    print(f"\nQ{i} [{q_type}]: {q['question']}")
+                    print(f"   Answer: {q['answer']}")
+
+        except AuthenticationError as exc:
+            print(f"\n🔒 Authentication Error: {exc.message}")
+            print("👉 Please ensure GROQ_API_KEY is set in your .env file or environment.")
+            break
+        except RateLimitError as exc:
+            print(f"\n⏳ Rate Limit Reached: {exc.message}")
+        except ServiceUnavailableError as exc:
+            print(f"\n⚠️ Service Notice: {exc.message}")
+        except EduSolveError as exc:
+            print(f"\n❌ Error: {exc.message}")
+        except KeyboardInterrupt:
+            print("\n\nSession interrupted by user.")
+            break
 
         # Ask if user wants to continue
         print("\n" + "-" * 60)
         again = input("Ask another doubt? (yes/no): ").strip().lower()
         if again not in ["yes", "y"]:
-            print("\nGoodbye! Keep studying! ")
+            print("\nGoodbye! Keep studying! 🚀")
             break
         print()
+
+
+if __name__ == "__main__":
+    run_cli()
