@@ -6,6 +6,8 @@ Refactored: April 2026 (Service-Oriented Core Architecture for EduSolve)
 This module provides the core interface for the EduSolve AI Tutor.
 It delegates to reusable backend services and offers backward-compatible
 helper functions for CLI and web integrations.
+
+Work well dont hallucinate.
 """
 
 import sys
